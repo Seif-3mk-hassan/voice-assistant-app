@@ -1,3 +1,4 @@
+# wishper.py
 import os
 
 base = r"C:\Users\Seif2\AppData\Local\Programs\Python\Python313\Lib\site-packages\nvidia"
@@ -7,64 +8,69 @@ dll_paths = [
     os.path.join(base, "cuda_runtime", "bin"),
     os.path.join(base, "nvjitlink", "bin"),
 ]
-
 os.environ["PATH"] = ";".join(dll_paths) + ";" + os.environ["PATH"]
 
 from faster_whisper import WhisperModel
 import sounddevice as sd
 import numpy as np
-import queue
-import threading
+import torch
+from silero_vad import load_silero_vad
 
-#settings 
 sample_rate = 16000
-block_duration = 0.5  # seconds
-chunk_duration = 2 # seconds
+frames_per_block = 512
+block_duration = frames_per_block / sample_rate
 channels = 1
+silence_timeout = 0.8
+min_speech_duration = 0.3
+silence_frame_limit = int(silence_timeout / block_duration)
 
-model_size = "medium"  # or "small", "large-v1", "large-v2"
+class TTS_class:
+    def __init__(self):
+        self.vad_model = load_silero_vad()
+        self.whisper_model = WhisperModel("medium", device="cuda", compute_type="float32")
 
-frames_per_block = int(sample_rate * block_duration)
-frames_per_chunk = int(sample_rate * chunk_duration)
+    def is_speech(self, audio_chunk):
+        tensor = torch.from_numpy(audio_chunk.flatten())
+        with torch.no_grad():
+            prob = self.vad_model(tensor, sample_rate).item()
+        return prob
 
-audio_queue = queue.Queue()
-audio_buffer = []
+    def transcribe(self, audio_data):
+        audio_data = audio_data.flatten().astype(np.float32)
+        segments, info = self.whisper_model.transcribe(
+            audio_data,
+            language="en",
+            beam_size=5,
+            vad_filter=True,
+            no_speech_threshold=0.6,
+            condition_on_previous_text=False,
+        )
+        return " ".join(seg.text.strip() for seg in segments).strip()
 
-# Run on GPU with FP16
-model = WhisperModel(model_size, device="cuda", compute_type="float32")
+    def listen_and_transcribe(self):
+        """Blocks until one utterance is detected, returns the transcribed text."""
+        speech_buffer = []
+        silence_frames = 0
+        in_speech = False
 
-def audio_callback(indata, frames, time, status):
-    if status:
-        print(status, flush=True)
-    audio_queue.put(indata.copy())
+        with sd.InputStream(samplerate=sample_rate, channels=channels, blocksize=frames_per_block) as stream:
+            while True:
+                block, overflowed = stream.read(frames_per_block)
+                prob = self.is_speech(block)
 
-def record_audio():
-    with sd.InputStream(samplerate=sample_rate, channels=channels, callback=audio_callback,blocksize=frames_per_block):
-        print("Recording audio... Press Ctrl+C to stop.")
-        while True:
-            sd.sleep(int(block_duration * 1000))
-
-def transcribe_audio():
-    global audio_buffer
-    while True:
-        # Get audio data from the queue
-        audio_data = audio_queue.get(timeout=1)
-        audio_buffer.append(audio_data)
-        
-        total_frames = sum(len(buffer) for buffer in audio_buffer)
-        if total_frames >= frames_per_chunk:
-            audio_data = np.concatenate(audio_buffer)[:frames_per_chunk]
-            audio_buffer = []
-            
-            audio_data = audio_data.flatten().astype(np.float32)
-            segments, info = model.transcribe(audio_data, language="en", beam_size=1, 
-                                            no_speech_threshold=0.6,       # skip segments likely to be silence
-                                            condition_on_previous_text=False,  # stops it "drifting" based on prior hallucinated text
-                                            vad_filter=True,               # built-in VAD to strip silence before transcribing
-                            )
-            for segment in segments:
-                print(segment.text)
-                
-if __name__ == "__main__":
-    threading.Thread(target=record_audio, daemon=True).start()
-    transcribe_audio()    
+                if prob > 0.5:
+                    speech_buffer.append(block)
+                    silence_frames = 0
+                    in_speech = True
+                else:
+                    if in_speech:
+                        silence_frames += 1
+                        speech_buffer.append(block)
+                        if silence_frames >= silence_frame_limit:
+                            total_duration = len(speech_buffer) * block_duration
+                            if total_duration >= min_speech_duration:
+                                audio_data = np.concatenate(speech_buffer)
+                                return self.transcribe(audio_data)
+                            speech_buffer = []
+                            silence_frames = 0
+                            in_speech = False
