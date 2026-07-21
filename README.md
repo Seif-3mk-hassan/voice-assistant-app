@@ -2,6 +2,10 @@
 
 A fully local, GPU-accelerated voice assistant with real tool access (Gmail, Google Calendar) via MCP. Speak a question, get a spoken-style response, powered by a local speech pipeline and a cloud LLM with tool-calling.
 
+## Demo
+
+![Voice assistant demo](assets/demo.gif)
+
 ## Features
 
 - **Speech-to-text** — `faster-whisper` running on GPU (CUDA), transcribes what you say
@@ -23,7 +27,7 @@ Microphone → Silero VAD → faster-whisper (GPU) → LangGraph agent (Groq Lla
 | Reasoning / tool use | LangGraph + Groq (`llama-3.3-70b-versatile`) | Free tier, tool-calling agent |
 | Tool access | MCP (Model Context Protocol) | Gmail + Calendar via community MCP servers |
 | UI | Streamlit | Click-to-talk, chat-style history |
-
+![Voice assistant architecture](assets\voice_assistant_architecture.png)
 ## Requirements
 
 - Windows 10/11
